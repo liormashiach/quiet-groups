@@ -4,7 +4,7 @@ on:
   schedule:
     # מוגדר לרוץ אוטומטית כל יום ראשון בשעה 03:00 בלילה
     - cron: "0 3 * * 0"
-  workflow_dispatch: // מאפשר גם הרצה ידנית בלחיצת כפתור מתוך GitHub
+  workflow_dispatch: # מאפשר גם הרצה ידנית בלחיצת כפתור מתוך GitHub
 
 jobs:
   sync:
