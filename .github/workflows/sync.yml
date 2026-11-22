@@ -1,6 +1,8 @@
 name: Supermarket Prices Auto-Sync
 
 on:
+  push:
+    branches: [main]
   schedule:
     # מוגדר לרוץ אוטומטית כל יום ראשון בשעה 03:00 בלילה
     - cron: "0 3 * * 0"
