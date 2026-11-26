@@ -41,6 +41,16 @@ import {
   RotateCcw,
 } from "lucide-react";
 
+import TasksView from "./components/TasksView";
+import ArchiveView from "./components/ArchiveView";
+import CollectionsView from "./components/CollectionsView";
+import EventsView from "./components/EventsView";
+import AnnouncementsView from "./components/AnnouncementsView";
+import PollsView from "./components/PollsView";
+import ExchangeView from "./components/ExchangeView";
+import RecommendationsView from "./components/RecommendationsView";
+import ContactsView from "./components/ContactsView";
+
 export default function App() {
   // --- Auth & Profile State ---
   const [session, setSession] = useState(null);
@@ -96,6 +106,7 @@ export default function App() {
   const [polls, setPolls] = useState([]);
   const [contacts, setContacts] = useState([]);
   const [collections, setCollections] = useState([]);
+  const [tasks, setTasks] = useState([]);
 
   // Catalog / Autocomplete State
   const [filteredCatalogSuggestions, setFilteredCatalogSuggestions] = useState(
@@ -149,6 +160,7 @@ export default function App() {
     { id: "collections", label: "גבייה", icon: Wallet },
     { id: "recommendations", label: "המלצות", icon: Sparkles },
     { id: "contacts", label: "טלפונים", icon: Phone },
+    { id: "tasks", label: "משימות", icon: Check },
   ];
 
   function getGroupLabels(type) {
@@ -257,6 +269,28 @@ export default function App() {
       ownerName === currentUser ||
       ownerName === profile?.display_name
     );
+  }
+
+  // ספירת פריטים / משימות משויכות אישית עבור לשוניות הניווט
+  function getTabBadgeCount(tabId) {
+    if (tabId === "tasks") {
+      if (!profile && !currentUser) return 0;
+
+      return tasks.filter((task) => {
+        const status = (task.status || "").toLowerCase();
+        const isDone = status === "done" || status === "completed";
+        if (isDone) return false; // אם בוצע - לא לספור
+
+        const assignee = task.assigned_to || task.assignee || "";
+        return (
+          assignee === currentUser ||
+          (profile?.display_name && assignee === profile.display_name) ||
+          (session?.user?.id && task.assigned_user_id === session.user.id)
+        );
+      }).length;
+    }
+
+    return 0;
   }
 
   // חיפוש חי מול טבלת המוצרים והמחירים האמיתיים ב-Supabase
@@ -457,7 +491,24 @@ export default function App() {
     if (data && data.length > 0) {
       const formatted = data
         .filter((row) => row.groups)
-        .map((row) => ({ ...row.groups, myRole: row.role }));
+        .map((row) => {
+          const group = row.groups;
+          let tabs = group.enabled_tabs;
+          if (typeof tabs === "string") {
+            try {
+              tabs = JSON.parse(tabs);
+            } catch (e) {
+              tabs = null;
+            }
+          }
+          return {
+            ...group,
+            enabled_tabs: Array.isArray(tabs)
+              ? tabs
+              : ALL_TABS_CONFIG.map((t) => t.id),
+            myRole: row.role,
+          };
+        });
       setGroups(formatted);
       setActiveGroup(
         (prev) => formatted.find((g) => g.id === prev?.id) || formatted[0],
@@ -582,6 +633,26 @@ export default function App() {
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
   }
 
+  async function toggleExchangeStatus(item) {
+    const isCurrentlyTaken =
+      item.status === "taken" ||
+      item.status === "claimed" ||
+      Boolean(item.claimed_by);
+
+    const updatedFields = isCurrentlyTaken
+      ? { status: "available", claimed_by: null }
+      : { status: "taken", claimed_by: currentUser };
+
+    setExchangeItems((prev) =>
+      prev.map((i) => (i.id === item.id ? { ...i, ...updatedFields } : i)),
+    );
+
+    await supabase
+      .from("exchange_items")
+      .update(updatedFields)
+      .eq("id", item.id);
+  }
+
   useEffect(() => {
     if (activeGroup && currentUser) {
       fetchGroupData(activeGroup.id);
@@ -596,6 +667,43 @@ export default function App() {
       }
     }
   }, [activeGroup?.id, currentUser]);
+
+  // סנכרון משימות בזמן אמת כדי שמונה המשימות האישיות יתעדכן מיידית
+  useEffect(() => {
+    if (!activeGroup?.id) return;
+
+    const tasksChannel = supabase
+      .channel(`realtime-tasks-${activeGroup.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "tasks",
+          filter: `group_id=eq.${activeGroup.id}`,
+        },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            setTasks((prev) =>
+              prev.some((t) => t.id === payload.new.id)
+                ? prev
+                : [payload.new, ...prev],
+            );
+          } else if (payload.eventType === "UPDATE") {
+            setTasks((prev) =>
+              prev.map((t) => (t.id === payload.new.id ? payload.new : t)),
+            );
+          } else if (payload.eventType === "DELETE") {
+            setTasks((prev) => prev.filter((t) => t.id !== payload.old.id));
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(tasksChannel);
+    };
+  }, [activeGroup?.id]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -619,45 +727,58 @@ export default function App() {
 
   async function fetchGroupData(groupId) {
     setLoading(true);
-    const [annRes, exRes, evRes, recRes, pollRes, contactRes, colRes] =
-      await Promise.all([
-        supabase
-          .from("announcements")
-          .select("*")
-          .eq("group_id", groupId)
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("exchange_items")
-          .select("*")
-          .eq("group_id", groupId)
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("events")
-          .select("*")
-          .eq("group_id", groupId)
-          .order("event_date", { ascending: true })
-          .order("event_time", { ascending: true }),
-        supabase
-          .from("recommendations")
-          .select("*")
-          .eq("group_id", groupId)
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("polls")
-          .select("*")
-          .eq("group_id", groupId)
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("contacts")
-          .select("*")
-          .eq("group_id", groupId)
-          .order("created_at", { ascending: true }),
-        supabase
-          .from("collections")
-          .select("*")
-          .eq("group_id", groupId)
-          .order("created_at", { ascending: false }),
-      ]);
+    const [
+      annRes,
+      exRes,
+      evRes,
+      recRes,
+      pollRes,
+      contactRes,
+      colRes,
+      tasksRes,
+    ] = await Promise.all([
+      supabase
+        .from("announcements")
+        .select("*")
+        .eq("group_id", groupId)
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("exchange_items")
+        .select("*")
+        .eq("group_id", groupId)
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("events")
+        .select("*")
+        .eq("group_id", groupId)
+        .order("event_date", { ascending: true })
+        .order("event_time", { ascending: true }),
+      supabase
+        .from("recommendations")
+        .select("*")
+        .eq("group_id", groupId)
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("polls")
+        .select("*")
+        .eq("group_id", groupId)
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("contacts")
+        .select("*")
+        .eq("group_id", groupId)
+        .order("created_at", { ascending: true }),
+      supabase
+        .from("collections")
+        .select("*")
+        .eq("group_id", groupId)
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("tasks")
+        .select("*")
+        .eq("group_id", groupId)
+        .order("created_at", { ascending: false }),
+    ]);
 
     setAnnouncements(annRes.data || []);
     setExchangeItems(exRes.data || []);
@@ -666,6 +787,7 @@ export default function App() {
     setPolls(pollRes.data || []);
     setContacts(contactRes.data || []);
     setCollections(colRes.data || []);
+    setTasks(tasksRes.data || []);
     setLoading(false);
   }
 
@@ -699,12 +821,18 @@ export default function App() {
   }
 
   // --- Collections Handlers ---
-  async function toggleCollectionPaid(col) {
+  async function toggleCollectionPaid(col, unitName) {
     const paidList = col.paid_users || [];
-    const hasPaid = paidList.includes(currentUser);
-    const updatedList = hasPaid
-      ? paidList.filter((u) => u !== currentUser)
-      : [...paidList, currentUser];
+    const existingEntry = paidList.find(
+      (entry) =>
+        entry === unitName ||
+        entry.startsWith(`${unitName}|`) ||
+        entry.includes(`(${unitName})`),
+    );
+
+    const updatedList = existingEntry
+      ? paidList.filter((entry) => entry !== existingEntry)
+      : [...paidList, `${unitName}|${currentUser}`];
 
     setCollections((prev) =>
       prev.map((c) =>
@@ -716,36 +844,35 @@ export default function App() {
       .update({ paid_users: updatedList })
       .eq("id", col.id);
 
-    if (!hasPaid) {
+    if (!existingEntry) {
       await sendTargetedNotification(
         col.creator,
-        `💳 ${currentUser} סימן/ה שהעביר/ה תשלום (${col.amount} ₪) עבור "${col.title}"`,
+        `💳 ${currentUser} סימן/ה תשלום (${col.amount} ₪) עבור ${unitName} ב"${col.title}"`,
       );
     }
   }
 
-  async function sendCollectionReminder(col) {
-    const paidList = col.paid_users || [];
-    const unpaidMembers = groupMembersList.filter((m) => {
-      const label = m.profiles
-        ? `${m.profiles.display_name}${m.profiles.role_badge ? ` (${m.profiles.role_badge})` : ""}`
-        : "";
-      return label && label !== currentUser && !paidList.includes(label);
-    });
-
-    if (unpaidMembers.length === 0) {
-      alert("כל חברי הקבוצה כבר סימנו ששילמו! 🎉");
+  async function sendCollectionReminder(col, unpaidUnits) {
+    if (!unpaidUnits || unpaidUnits.length === 0) {
+      alert("כולם כבר שילמו! 🎉");
       return;
     }
 
-    for (const m of unpaidMembers) {
-      const recipientLabel = `${m.profiles.display_name}${m.profiles.role_badge ? ` (${m.profiles.role_badge})` : ""}`;
-      await sendTargetedNotification(
-        recipientLabel,
-        `💳 תזכורת שקטה: טרם סומן תשלום (${col.amount} ₪) עבור "${col.title}"`,
-      );
+    let sentCount = 0;
+    for (const unit of unpaidUnits) {
+      for (const memberLabel of unit.members) {
+        if (memberLabel && memberLabel !== currentUser) {
+          await sendTargetedNotification(
+            memberLabel,
+            `💳 תזכורת שקטה: טרם סומן תשלום (${col.amount} ₪) עבור ${unit.unitName} ב"${col.title}"`,
+          );
+          sentCount++;
+        }
+      }
     }
-    alert(`נשלחה תזכורת שקטה ל-${unpaidMembers.length} חברים שטרם שילמו.`);
+    alert(
+      `נשלחה תזכורת שקטה ל-${sentCount} חברים המשויכים ליחידות שטרם שילמו.`,
+    );
   }
 
   // --- Calendar & Export Helpers ---
@@ -900,6 +1027,12 @@ export default function App() {
           a.id === item.id ? { ...a, expires_at: newExpiresIso } : a,
         ),
       );
+    } else if (table === "polls") {
+      setPolls((prev) =>
+        prev.map((p) =>
+          p.id === item.id ? { ...p, expires_at: newExpiresIso } : p,
+        ),
+      );
     }
 
     await supabase
@@ -930,17 +1063,7 @@ export default function App() {
   function handleGroupTypeChange(newType) {
     setGroupType(newType);
     if (!editingGroup) {
-      if (newType === "family") {
-        setGroupEnabledTabs([
-          "announcements",
-          "exchange",
-          "events",
-          "polls",
-          "recommendations",
-        ]);
-      } else {
-        setGroupEnabledTabs(ALL_TABS_CONFIG.map((t) => t.id));
-      }
+      setGroupEnabledTabs(ALL_TABS_CONFIG.map((t) => t.id));
     }
   }
 
@@ -969,26 +1092,48 @@ export default function App() {
     e.preventDefault();
     if (!groupName.trim() || !session?.user) return;
 
+    const tabsToSave = Array.isArray(groupEnabledTabs)
+      ? groupEnabledTabs
+      : ALL_TABS_CONFIG.map((t) => t.id);
+
     if (editingGroup) {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("groups")
         .update({
           name: groupName,
           type: groupType,
           subtitle: groupSubtitle,
-          enabled_tabs: groupEnabledTabs,
+          enabled_tabs: tabsToSave,
         })
         .eq("id", editingGroup.id)
-        .select()
-        .single();
-      if (data) {
-        const updated = { ...data, myRole: editingGroup.myRole };
-        setGroups((prev) => prev.map((g) => (g.id === data.id ? updated : g)));
-        setActiveGroup(updated);
+        .select();
+
+      if (error) {
+        alert("שגיאה בעדכון הקבוצה: " + error.message);
+        return;
       }
+
+      if (!data || data.length === 0) {
+        alert(
+          "אזהרה: הפעולה הצליחה אך לא נמצאה שורה לעדכון ב-DB. בדוק את ה-ID של הקבוצה.",
+        );
+        return;
+      }
+
+      const updatedGroupFromDb = {
+        ...data[0],
+        myRole: editingGroup.myRole || "admin",
+      };
+
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.id === updatedGroupFromDb.id ? updatedGroupFromDb : g,
+        ),
+      );
+      setActiveGroup(updatedGroupFromDb);
     } else {
       const newCode = generateInviteCode();
-      const { data: createdGroup } = await supabase
+      const { data: createdGroup, error: createErr } = await supabase
         .from("groups")
         .insert({
           name: groupName,
@@ -996,10 +1141,15 @@ export default function App() {
           subtitle: groupSubtitle || "קבוצה שקטה חדשה",
           members_count: 1,
           invite_code: newCode,
-          enabled_tabs: groupEnabledTabs,
+          enabled_tabs: tabsToSave,
         })
         .select()
         .single();
+
+      if (createErr) {
+        alert("שגיאה ביצירת קבוצה: " + createErr.message);
+        return;
+      }
 
       if (createdGroup) {
         await supabase.from("group_members").insert({
@@ -1007,7 +1157,11 @@ export default function App() {
           user_id: session.user.id,
           role: "admin",
         });
-        const groupWithRole = { ...createdGroup, myRole: "admin" };
+        const groupWithRole = {
+          ...createdGroup,
+          enabled_tabs: tabsToSave,
+          myRole: "admin",
+        };
         setGroups((prev) => [...prev, groupWithRole]);
         setActiveGroup(groupWithRole);
       }
@@ -1380,29 +1534,65 @@ export default function App() {
 
   // --- Interactions ---
   async function handleVotePoll(poll, optionId) {
-    const updatedOptions = (poll.options || []).map((opt) => {
-      const filteredVotes = (opt.votes || []).filter((u) => u !== currentUser);
-      if (opt.id === optionId) {
-        const alreadyVotedThis = (opt.votes || []).includes(currentUser);
+    const options = poll.options || [];
+    const usesNestedVotes = options.some(
+      (opt) => typeof opt === "object" && opt !== null && "votes" in opt,
+    );
+
+    if (usesNestedVotes) {
+      const updatedOptions = options.map((opt, idx) => {
+        const currentId = opt.id !== undefined ? opt.id : idx;
+        const currentVotes = Array.isArray(opt.votes) ? opt.votes : [];
+        const alreadyVotedThis = currentVotes.includes(currentUser);
+
+        if (currentId === optionId) {
+          return {
+            ...opt,
+            votes: alreadyVotedThis
+              ? currentVotes.filter((u) => u !== currentUser)
+              : [...currentVotes, currentUser],
+          };
+        }
         return {
           ...opt,
-          votes: alreadyVotedThis
-            ? filteredVotes
-            : [...filteredVotes, currentUser],
+          votes: currentVotes.filter((u) => u !== currentUser),
         };
-      }
-      return { ...opt, votes: filteredVotes };
-    });
+      });
 
-    setPolls((prev) =>
-      prev.map((p) =>
-        p.id === poll.id ? { ...p, options: updatedOptions } : p,
-      ),
-    );
-    await supabase
-      .from("polls")
-      .update({ options: updatedOptions })
-      .eq("id", poll.id);
+      setPolls((prev) =>
+        prev.map((p) =>
+          p.id === poll.id ? { ...p, options: updatedOptions } : p,
+        ),
+      );
+      await supabase
+        .from("polls")
+        .update({ options: updatedOptions })
+        .eq("id", poll.id);
+    } else {
+      const votesMap = { ...(poll.votes || {}) };
+      const targetVotes = Array.isArray(votesMap[optionId])
+        ? votesMap[optionId]
+        : [];
+      const alreadyVotedThis = targetVotes.includes(currentUser);
+
+      Object.keys(votesMap).forEach((key) => {
+        if (Array.isArray(votesMap[key])) {
+          votesMap[key] = votesMap[key].filter((u) => u !== currentUser);
+        }
+      });
+
+      if (!alreadyVotedThis) {
+        votesMap[optionId] = [...(votesMap[optionId] || []), currentUser];
+      }
+
+      setPolls((prev) =>
+        prev.map((p) => (p.id === poll.id ? { ...p, votes: votesMap } : p)),
+      );
+      await supabase
+        .from("polls")
+        .update({ votes: votesMap })
+        .eq("id", poll.id);
+    }
   }
 
   async function toggleReserveItem(item) {
@@ -1511,6 +1701,26 @@ export default function App() {
         `${currentUser} פרגן/ה להמלצה שלך: "${rec.title}"`,
       );
     }
+  }
+
+  async function sendEventReminder(ev) {
+    const goingList = ev.rsvps?.going || [];
+    if (goingList.length === 0) {
+      alert("אין עדיין משתתפים שאישרו הגעה לאירוע זה.");
+      return;
+    }
+
+    let sentCount = 0;
+    for (const participant of goingList) {
+      if (participant !== currentUser) {
+        await sendTargetedNotification(
+          participant,
+          `🔔 תזכורת לקראת האירוע "${ev.title}" שמתקיים ב-${ev.date_str || ev.event_date}`,
+        );
+        sentCount++;
+      }
+    }
+    alert(`נשלחה תזכורת שקטה ל-${sentCount} משתתפים שאישרו הגעה.`);
   }
 
   if (authLoading) {
@@ -1668,12 +1878,24 @@ export default function App() {
     ? visibleEvents.filter((ev) => ev.event_date === selectedDateFilter)
     : visibleEvents;
 
-  const totalMembersCount = Math.max(
-    groupMembersList.length,
-    activeGroup?.members_count || 1,
-  );
-  const activeGroupEnabledTabs =
-    activeGroup?.enabled_tabs || ALL_TABS_CONFIG.map((t) => t.id);
+  const totalMembersCount =
+    groupMembersList.length > 0
+      ? groupMembersList.length
+      : activeGroup?.members_count || 1;
+
+  const activeGroupEnabledTabs = (() => {
+    let tabs = activeGroup?.enabled_tabs;
+    if (typeof tabs === "string") {
+      try {
+        tabs = JSON.parse(tabs);
+      } catch (e) {
+        tabs = null;
+      }
+    }
+    return Array.isArray(tabs) && tabs.length > 0
+      ? tabs
+      : ALL_TABS_CONFIG.map((t) => t.id);
+  })();
 
   return (
     <div
@@ -1938,898 +2160,143 @@ export default function App() {
                   )}
                 </div>
 
-                {((activeTab !== "announcements" &&
+                {/*                 {((activeTab !== "announcements" &&
                   activeTab !== "contacts" &&
-                  activeTab !== "collections") ||
-                  isGroupAdmin) && (
-                  <button
-                    onClick={() => openCreateItemModal()}
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1.5 rounded-xl flex items-center gap-1 font-bold shadow-sm transition"
-                  >
-                    <Plus size={15} /> הוסף חדש
-                  </button>
-                )}
+                  activeTab !== "collections" &&
+                  activeTab !== "tasks") ||
+                  isGroupAdmin) &&
+                  activeTab !== "tasks" && (
+                    <button
+                      onClick={() => openCreateItemModal()}
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1.5 rounded-xl flex items-center gap-1 font-bold shadow-sm transition"
+                    >
+                      <Plus size={15} /> הוסף חדש
+                    </button>
+                  )} */}
               </div>
 
               {/* 1. Announcements */}
               {activeTab === "announcements" && (
-                <div className="space-y-3">
-                  {filterByExpiration(announcements).map((a) => {
-                    const ttl = formatTimeRemaining(a.expires_at);
-                    return (
-                      <div
-                        key={a.id}
-                        className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200"
-                      >
-                        <div className="flex justify-between items-start mb-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-xs text-indigo-600 font-semibold">
-                              {a.author} • {a.role}
-                            </span>
-                            {ttl && (
-                              <span
-                                className={`text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 font-medium ${
-                                  ttl.urgent || ttl.expired
-                                    ? "bg-rose-50 text-rose-700 font-bold"
-                                    : "bg-amber-50 text-amber-700"
-                                }`}
-                              >
-                                <Clock size={10} /> {ttl.text}
-                              </span>
-                            )}
-                          </div>
-                          {canManage(a.author) && (
-                            <div className="flex items-center gap-1 text-slate-400">
-                              <button
-                                onClick={() => openEditItemModal(a)}
-                                className="p-1 hover:text-indigo-600"
-                              >
-                                <Edit2 size={14} />
-                              </button>
-                              <button
-                                onClick={() =>
-                                  handleDeleteItem("announcements", a.id)
-                                }
-                                className="p-1 hover:text-rose-600"
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                        <h3 className="font-bold text-slate-800 text-base mb-1">
-                          {a.title}
-                        </h3>
-                        <p className="text-sm text-slate-600 leading-relaxed">
-                          {a.content}
-                        </p>
-                      </div>
-                    );
-                  })}
-                </div>
+                <AnnouncementsView
+                  announcements={announcements}
+                  canManage={canManage}
+                  isGroupAdmin={isGroupAdmin}
+                  showExpired={showExpired}
+                  formatHebrewDate={formatHebrewDate}
+                  openCreateItemModal={openCreateItemModal}
+                  openEditItemModal={openEditItemModal}
+                  handleDeleteItem={handleDeleteItem}
+                  // togglePinAnnouncement={togglePinAnnouncement}
+                />
               )}
 
-              {/* 2. Exchange / Shopping List */}
+              {/* 2. Exchange / Shopping */}
               {activeTab === "exchange" && (
-                <div className="space-y-3">
-                  {filterByExpiration(exchangeItems).map((item) => {
-                    const isReserved = item.status === "RESERVED";
-                    const isMine = item.reserved_by === currentUser;
-                    const ttl = formatTimeRemaining(item.expires_at);
-
-                    return (
-                      <div
-                        key={item.id}
-                        className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex justify-between items-center gap-2"
-                      >
-                        <div className="flex items-start gap-3">
-                          <span className="text-2xl bg-slate-100 p-2.5 rounded-2xl">
-                            {item.emoji || labels.exchangeEmoji}
-                          </span>
-                          <div>
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="text-[11px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-md font-medium">
-                                {item.category}
-                              </span>
-                              {ttl && (
-                                <span
-                                  className={`text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 ${
-                                    ttl.urgent || ttl.expired
-                                      ? "bg-rose-50 text-rose-700 font-bold"
-                                      : "bg-amber-50 text-amber-700"
-                                  }`}
-                                >
-                                  <Clock size={10} /> {ttl.text}
-                                </span>
-                              )}
-                              {canManage(item.owner_name) && (
-                                <>
-                                  <button
-                                    onClick={() => openEditItemModal(item)}
-                                    className="text-slate-400 hover:text-indigo-600"
-                                  >
-                                    <Edit2 size={13} />
-                                  </button>
-                                  <button
-                                    onClick={() =>
-                                      handleDeleteItem(
-                                        "exchange_items",
-                                        item.id,
-                                      )
-                                    }
-                                    className="text-slate-400 hover:text-rose-600"
-                                  >
-                                    <Trash2 size={13} />
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                            <h3
-                              className={`font-bold mt-1 ${isReserved && activeGroup?.type === "family" ? "line-through text-slate-400" : "text-slate-800"}`}
-                            >
-                              {item.title}
-                            </h3>
-                            <p className="text-xs text-slate-500">
-                              נוסף ע״י {item.owner_name} • {item.condition}
-                            </p>
-
-                            {ttl?.canExtend && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleExtendItemExpiry("exchange_items", item)
-                                }
-                                className="mt-1.5 text-[11px] bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-2.5 py-1 rounded-lg font-bold inline-flex items-center gap-1 transition"
-                              >
-                                <RotateCcw size={11} /> הארך בחודש (+30 יום)
-                              </button>
-                            )}
-
-                            {isReserved && (
-                              <span className="block mt-1.5 text-xs bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md font-medium w-fit">
-                                {labels.exchangeStatusBadge} {item.reserved_by}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        {(!isReserved || isMine) && (
-                          <button
-                            onClick={() => toggleReserveItem(item)}
-                            className={`px-3 py-2 rounded-xl text-xs font-bold shrink-0 transition ${
-                              isMine
-                                ? "bg-slate-200 text-slate-700"
-                                : "bg-indigo-600 text-white hover:bg-indigo-700"
-                            }`}
-                          >
-                            {isMine
-                              ? labels.exchangeUndoBtn
-                              : labels.exchangeActionBtn}
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                <ExchangeView
+                  exchangeItems={exchangeItems}
+                  currentUser={currentUser}
+                  canManage={canManage}
+                  showExpired={showExpired}
+                  formatHebrewDate={formatHebrewDate}
+                  openCreateItemModal={openCreateItemModal}
+                  openEditItemModal={openEditItemModal}
+                  handleDeleteItem={handleDeleteItem}
+                  toggleExchangeStatus={toggleExchangeStatus}
+                />
               )}
 
               {/* 3. Events & Calendar */}
               {activeTab === "events" && (
-                <div className="space-y-4">
-                  <div className="bg-white p-3.5 rounded-2xl shadow-sm border border-slate-200 space-y-2.5">
-                    <div className="flex justify-between items-center">
-                      <button
-                        onClick={() =>
-                          setCalendarMonth(
-                            new Date(
-                              calendarMonth.getFullYear(),
-                              calendarMonth.getMonth() - 1,
-                              1,
-                            ),
-                          )
-                        }
-                        className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600"
-                      >
-                        <ChevronRight size={16} />
-                      </button>
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-sm text-slate-800">
-                          {calendarMonth.toLocaleDateString("he-IL", {
-                            month: "long",
-                            year: "numeric",
-                          })}
-                        </span>
-                        {selectedDateFilter && (
-                          <button
-                            onClick={() => setSelectedDateFilter(null)}
-                            className="text-[10px] bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full font-bold"
-                          >
-                            הצג הכל ({visibleEvents.length})
-                          </button>
-                        )}
-                      </div>
-                      <button
-                        onClick={() =>
-                          setCalendarMonth(
-                            new Date(
-                              calendarMonth.getFullYear(),
-                              calendarMonth.getMonth() + 1,
-                              1,
-                            ),
-                          )
-                        }
-                        className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600"
-                      >
-                        <ChevronLeft size={16} />
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-7 text-center text-[11px] font-bold text-slate-400">
-                      {["א׳", "ב׳", "ג׳", "ד׳", "ה׳", "ו׳", "ש׳"].map((d) => (
-                        <div key={d} className="py-1">
-                          {d}
-                        </div>
-                      ))}
-                    </div>
-
-                    <div className="grid grid-cols-7 gap-1 text-center">
-                      {monthDays.map((cell, idx) => {
-                        if (!cell) return <div key={`empty-${idx}`} />;
-                        const count = eventsCountByDate[cell.iso] || 0;
-                        const isSelected = selectedDateFilter === cell.iso;
-                        const isToday = todayIso === cell.iso;
-
-                        return (
-                          <button
-                            key={cell.iso}
-                            onClick={() =>
-                              setSelectedDateFilter(
-                                isSelected ? null : cell.iso,
-                              )
-                            }
-                            className={`h-10 rounded-xl flex flex-col items-center justify-center text-xs transition relative ${
-                              isSelected
-                                ? "bg-indigo-600 text-white font-bold shadow-sm"
-                                : count > 0
-                                  ? "bg-indigo-50 text-indigo-900 font-bold hover:bg-indigo-100"
-                                  : isToday
-                                    ? "border border-indigo-400 text-indigo-700 font-semibold"
-                                    : "text-slate-700 hover:bg-slate-100"
-                            }`}
-                          >
-                            <span>{cell.day}</span>
-                            {count === 1 && (
-                              <span
-                                className={`w-1.5 h-1.5 rounded-full mt-0.5 ${
-                                  isSelected ? "bg-amber-300" : "bg-indigo-600"
-                                }`}
-                              />
-                            )}
-                            {count > 1 && (
-                              <span
-                                className={`text-[9px] leading-none px-1.5 py-0.5 rounded-full font-bold mt-0.5 ${
-                                  isSelected
-                                    ? "bg-amber-300 text-slate-900"
-                                    : "bg-indigo-600 text-white"
-                                }`}
-                              >
-                                {count}
-                              </span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {selectedDateFilter && (
-                    <div className="flex justify-between items-center bg-indigo-50/80 border border-indigo-200 px-3 py-2 rounded-xl text-xs">
-                      <span className="font-bold text-indigo-900">
-                        מציג {displayedEvents.length} אירועים ב-
-                        {formatHebrewDate(selectedDateFilter)}
-                      </span>
-                      <button
-                        onClick={() => openCreateItemModal(selectedDateFilter)}
-                        className="bg-indigo-600 text-white px-2.5 py-1 rounded-lg font-bold text-[11px] flex items-center gap-1"
-                      >
-                        <Plus size={12} /> אירוע נוסף ביום זה
-                      </button>
-                    </div>
-                  )}
-
-                  {displayedEvents.length === 0 ? (
-                    <div className="text-center py-6 bg-white rounded-2xl border border-dashed border-slate-300 space-y-2">
-                      <p className="text-xs text-slate-500">
-                        אין אירועים מתוכננים בתאריך זה.
-                      </p>
-                      <button
-                        onClick={() => openCreateItemModal(selectedDateFilter)}
-                        className="text-xs text-indigo-600 font-bold hover:underline"
-                      >
-                        + הוסף אירוע לתאריך {selectedDateFilter}
-                      </button>
-                    </div>
-                  ) : (
-                    displayedEvents.map((ev) => {
-                      const goingList = ev.rsvps?.going || [];
-                      const isGoing = goingList.includes(currentUser);
-                      const ttl = formatTimeRemaining(ev.expires_at);
-                      const displayDate = ev.event_date
-                        ? formatHebrewDate(ev.event_date, ev.event_time)
-                        : ev.date_str;
-
-                      return (
-                        <div
-                          key={ev.id}
-                          className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3"
-                        >
-                          <div className="flex justify-between items-start">
-                            <div>
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="text-xs text-indigo-600 font-bold">
-                                  {displayDate}
-                                </span>
-                                {ttl && (
-                                  <span className="text-[10px] bg-amber-50 text-amber-700 px-2 py-0.5 rounded-full flex items-center gap-1 font-medium">
-                                    <Clock size={10} /> {ttl.text}
-                                  </span>
-                                )}
-                              </div>
-                              <h3 className="font-bold text-lg text-slate-800 mt-0.5">
-                                {ev.title}
-                              </h3>
-                              <p className="text-xs text-slate-500 flex items-center gap-1 mt-0.5">
-                                <MapPin size={13} /> {ev.location} • מארגן:{" "}
-                                {ev.organizer}
-                              </p>
-                            </div>
-                            {canManage(ev.organizer) && (
-                              <div className="flex items-center gap-1 text-slate-400">
-                                <button
-                                  onClick={() => openEditItemModal(ev)}
-                                  className="p-1 hover:text-indigo-600"
-                                >
-                                  <Edit2 size={14} />
-                                </button>
-                                <button
-                                  onClick={() =>
-                                    handleDeleteItem("events", ev.id)
-                                  }
-                                  className="p-1 hover:text-rose-600"
-                                >
-                                  <Trash2 size={14} />
-                                </button>
-                              </div>
-                            )}
-                          </div>
-
-                          <p className="text-sm text-slate-600">
-                            {ev.description}
-                          </p>
-
-                          <div className="flex gap-2">
-                            <a
-                              href={getGoogleCalendarUrl(ev)}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="flex-1 bg-slate-50 hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 border border-slate-200 py-1.5 px-2.5 rounded-xl text-[11px] font-semibold flex items-center justify-center gap-1.5 transition"
-                            >
-                              <CalendarPlus
-                                size={13}
-                                className="text-indigo-600"
-                              />{" "}
-                              יומן Google
-                            </a>
-                            <button
-                              type="button"
-                              onClick={() => downloadIcsFile(ev)}
-                              className="flex-1 bg-slate-50 hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 border border-slate-200 py-1.5 px-2.5 rounded-xl text-[11px] font-semibold flex items-center justify-center gap-1.5 transition"
-                            >
-                              <Download size={13} className="text-indigo-600" />{" "}
-                              יומן Apple (.ics)
-                            </button>
-                          </div>
-
-                          <div className="flex items-center justify-between bg-slate-50 p-2.5 rounded-xl border">
-                            <span className="text-xs font-medium text-slate-700">
-                              ✅ {goingList.length} משתתפים מגיעים
-                            </span>
-                            <button
-                              onClick={() =>
-                                handleRsvp(ev, isGoing ? "declined" : "going")
-                              }
-                              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition ${
-                                isGoing
-                                  ? "bg-emerald-600 text-white"
-                                  : "bg-white border border-slate-300 text-slate-700"
-                              }`}
-                            >
-                              <Check size={14} />{" "}
-                              {isGoing ? "מגיעים! (בטל)" : "אנחנו מגיעים"}
-                            </button>
-                          </div>
-
-                          <div className="space-y-1.5 pt-2 border-t">
-                            <div className="text-xs font-bold text-slate-700">
-                              חלוקת ציוד / כיבוד:
-                            </div>
-                            {(ev.checklist || []).map((c) => (
-                              <div
-                                key={c.id}
-                                className="flex justify-between items-center text-xs bg-slate-50 p-2 rounded-lg"
-                              >
-                                <div className="flex items-center gap-2">
-                                  {canManage(ev.organizer) && (
-                                    <button
-                                      onClick={() =>
-                                        removeInlineChecklistItem(ev, c.id)
-                                      }
-                                      className="text-slate-400 hover:text-rose-600"
-                                      title="הסר פריט"
-                                    >
-                                      <X size={13} />
-                                    </button>
-                                  )}
-                                  <span
-                                    className={
-                                      c.assignedTo
-                                        ? "line-through text-slate-400"
-                                        : "text-slate-800 font-medium"
-                                    }
-                                  >
-                                    {c.item}
-                                  </span>
-                                </div>
-                                <button
-                                  onClick={() => toggleChecklistItem(ev, c.id)}
-                                  className={`px-2 py-1 rounded text-[11px] font-semibold ${
-                                    c.assignedTo
-                                      ? "bg-emerald-100 text-emerald-800"
-                                      : "bg-indigo-50 text-indigo-700"
-                                  }`}
-                                >
-                                  {c.assignedTo
-                                    ? `מביא/ה: ${c.assignedTo}`
-                                    : "+ עליי!"}
-                                </button>
-                              </div>
-                            ))}
-
-                            {canManage(ev.organizer) && (
-                              <div className="flex gap-1.5 pt-1">
-                                <input
-                                  type="text"
-                                  placeholder="הוסף פריט לכיבוד/ציוד..."
-                                  value={inlineItemInputs[ev.id] || ""}
-                                  onChange={(e) =>
-                                    setInlineItemInputs((prev) => ({
-                                      ...prev,
-                                      [ev.id]: e.target.value,
-                                    }))
-                                  }
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
-                                      e.preventDefault();
-                                      addInlineChecklistItem(ev);
-                                    }
-                                  }}
-                                  className="flex-1 border border-slate-200 bg-white px-2.5 py-1.5 rounded-lg text-xs"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => addInlineChecklistItem(ev)}
-                                  className="bg-indigo-600 text-white px-2.5 py-1.5 rounded-lg text-xs font-bold"
-                                >
-                                  + הוסף
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
+                <EventsView
+                  events={events}
+                  activeGroup={activeGroup}
+                  currentUser={currentUser}
+                  groupMembersList={groupMembersList}
+                  canManage={canManage}
+                  showExpired={showExpired}
+                  setShowExpired={setShowExpired}
+                  formatHebrewDate={formatHebrewDate}
+                  getGoogleCalendarUrl={getGoogleCalendarUrl}
+                  downloadIcsFile={downloadIcsFile}
+                  openCreateItemModal={openCreateItemModal}
+                  openEditItemModal={openEditItemModal}
+                  handleDeleteItem={handleDeleteItem}
+                  handleRsvp={handleRsvp}
+                  toggleChecklistItem={toggleChecklistItem}
+                  addInlineChecklistItem={addInlineChecklistItem}
+                  removeInlineChecklistItem={removeInlineChecklistItem}
+                  inlineItemInputs={inlineItemInputs}
+                  setInlineItemInputs={setInlineItemInputs}
+                  sendEventReminder={sendEventReminder}
+                />
               )}
 
-              {/* 4. Polls / Family Requests */}
+              {/* 4. Polls */}
               {activeTab === "polls" && (
-                <div className="space-y-3">
-                  {filterByExpiration(polls).map((poll) => {
-                    const totalVotes = (poll.options || []).reduce(
-                      (sum, o) => sum + (o.votes?.length || 0),
-                      0,
-                    );
-                    const ttl = formatTimeRemaining(poll.expires_at);
-
-                    return (
-                      <div
-                        key={poll.id}
-                        className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3"
-                      >
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs text-indigo-600 font-semibold">
-                                נפתח ע״י {poll.creator}
-                              </span>
-                              {ttl && (
-                                <span className="text-[10px] bg-amber-50 text-amber-700 px-2 py-0.5 rounded-full flex items-center gap-1">
-                                  <Clock size={10} /> {ttl.text}
-                                </span>
-                              )}
-                            </div>
-                            <h3 className="font-bold text-slate-800 text-base mt-1">
-                              {poll.question}
-                            </h3>
-                          </div>
-                          {canManage(poll.creator) && (
-                            <button
-                              onClick={() => handleDeleteItem("polls", poll.id)}
-                              className="text-slate-400 hover:text-rose-600"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          )}
-                        </div>
-
-                        <div className="space-y-2">
-                          {(poll.options || []).map((opt) => {
-                            const votesCount = opt.votes?.length || 0;
-                            const pct =
-                              totalVotes > 0
-                                ? Math.round((votesCount / totalVotes) * 100)
-                                : 0;
-                            const isSelected = (opt.votes || []).includes(
-                              currentUser,
-                            );
-
-                            return (
-                              <button
-                                key={opt.id}
-                                onClick={() => handleVotePoll(poll, opt.id)}
-                                className={`w-full text-right p-2.5 rounded-xl border transition relative overflow-hidden ${
-                                  isSelected
-                                    ? "border-indigo-600 bg-indigo-50/40 font-bold"
-                                    : "border-slate-200 hover:bg-slate-50"
-                                }`}
-                              >
-                                <div
-                                  className="absolute inset-y-0 right-0 bg-indigo-100/60 transition-all duration-300"
-                                  style={{ width: `${pct}%` }}
-                                />
-                                <div className="relative flex justify-between items-center text-xs">
-                                  <span className="flex items-center gap-1.5 text-slate-800">
-                                    {isSelected && (
-                                      <Check
-                                        size={14}
-                                        className="text-indigo-600"
-                                      />
-                                    )}{" "}
-                                    {opt.text}
-                                  </span>
-                                  <span className="text-slate-500 font-semibold">
-                                    {pct}% ({votesCount})
-                                  </span>
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                        <div className="text-[11px] text-slate-400">
-                          סה״כ {totalVotes} בחירות • לחיצה מצביעה מיד ללא הודעות
-                          מיותרות
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                <PollsView
+                  polls={polls}
+                  currentUser={currentUser}
+                  canManage={canManage}
+                  showExpired={showExpired}
+                  setShowExpired={setShowExpired}
+                  formatHebrewDate={formatHebrewDate}
+                  openCreateItemModal={openCreateItemModal}
+                  openEditItemModal={openEditItemModal}
+                  handleDeleteItem={handleDeleteItem}
+                  handleVotePoll={handleVotePoll}
+                />
               )}
 
               {/* 5. Collections */}
               {activeTab === "collections" && (
-                <div className="space-y-3">
-                  {collections.length === 0 ? (
-                    <div className="text-center py-8 bg-white rounded-2xl border border-dashed border-slate-300 space-y-2">
-                      <Wallet size={28} className="mx-auto text-slate-400" />
-                      <p className="text-xs text-slate-500">
-                        אין כרגע בקשות גבייה פעילות בקבוצה.
-                      </p>
-                    </div>
-                  ) : (
-                    collections.map((col) => {
-                      const paidList = col.paid_users || [];
-                      const isPaidByMe = paidList.includes(currentUser);
-                      const progressPct = Math.min(
-                        100,
-                        Math.round((paidList.length / totalMembersCount) * 100),
-                      );
-                      const totalCollected =
-                        paidList.length * (Number(col.amount) || 0);
-
-                      return (
-                        <div
-                          key={col.id}
-                          className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3"
-                        >
-                          <div className="flex justify-between items-start">
-                            <div>
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="text-xs bg-emerald-50 text-emerald-700 font-bold px-2 py-0.5 rounded-lg">
-                                  {col.amount} ₪ למשתתף
-                                </span>
-                                {col.due_date && (
-                                  <span className="text-[11px] text-slate-500">
-                                    יעד: {formatHebrewDate(col.due_date)}
-                                  </span>
-                                )}
-                              </div>
-                              <h3 className="font-bold text-slate-800 text-base mt-1">
-                                {col.title}
-                              </h3>
-                              <p className="text-[11px] text-slate-400">
-                                נפתח ע״י {col.creator}
-                              </p>
-                            </div>
-
-                            {canManage(col.creator) && (
-                              <div className="flex items-center gap-1 text-slate-400">
-                                <button
-                                  onClick={() => openEditItemModal(col)}
-                                  className="p-1 hover:text-indigo-600"
-                                >
-                                  <Edit2 size={14} />
-                                </button>
-                                <button
-                                  onClick={() =>
-                                    handleDeleteItem("collections", col.id)
-                                  }
-                                  className="p-1 hover:text-rose-600"
-                                >
-                                  <Trash2 size={14} />
-                                </button>
-                              </div>
-                            )}
-                          </div>
-
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[11px] font-semibold text-slate-600">
-                              <span>
-                                שילמו {paidList.length} מתוך {totalMembersCount}{" "}
-                                חברים
-                              </span>
-                              <span className="text-emerald-700">
-                                נאספו {totalCollected} ₪
-                              </span>
-                            </div>
-                            <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                              <div
-                                className="h-full bg-emerald-500 transition-all duration-300"
-                                style={{ width: `${progressPct}%` }}
-                              />
-                            </div>
-                          </div>
-
-                          <div className="flex gap-2 pt-1">
-                            {col.payment_link && (
-                              <a
-                                href={col.payment_link}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm transition"
-                              >
-                                <ExternalLink size={14} /> לתשלום ב-Bit / PayBox
-                              </a>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => toggleCollectionPaid(col)}
-                              className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 border transition ${
-                                isPaidByMe
-                                  ? "bg-emerald-600 text-white border-emerald-600"
-                                  : "bg-slate-50 hover:bg-emerald-50 text-slate-700 border-slate-300"
-                              }`}
-                            >
-                              <Check size={14} />{" "}
-                              {isPaidByMe ? "שולם! (בטל)" : "העברתי תשלום"}
-                            </button>
-                          </div>
-
-                          {canManage(col.creator) && (
-                            <div className="pt-2.5 border-t border-slate-100 space-y-2">
-                              <div className="flex justify-between items-center">
-                                <span className="text-[11px] font-bold text-slate-600">
-                                  מעקב מנהל (מוסתר משאר הקבוצה):
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => sendCollectionReminder(col)}
-                                  className="text-[11px] bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 px-2.5 py-1 rounded-lg font-bold flex items-center gap-1 transition"
-                                >
-                                  <Bell size={11} /> שלח תזכורת שקטה
-                                </button>
-                              </div>
-                              {paidList.length > 0 && (
-                                <div className="flex flex-wrap gap-1">
-                                  {paidList.map((u) => (
-                                    <span
-                                      key={u}
-                                      className="text-[10px] bg-emerald-50 text-emerald-800 px-2 py-0.5 rounded-md font-medium"
-                                    >
-                                      ✓ {u}
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
+                <CollectionsView
+                  collections={collections}
+                  activeGroup={activeGroup}
+                  currentUser={currentUser}
+                  userRoleBadge={profile?.role_badge || ""}
+                  groupMembersList={groupMembersList}
+                  canManage={canManage}
+                  formatHebrewDate={formatHebrewDate}
+                  onEditCollection={openEditItemModal}
+                  onDeleteCollection={handleDeleteItem}
+                  onToggleUnitPaid={toggleCollectionPaid}
+                  onSendUnitReminder={sendCollectionReminder}
+                />
               )}
 
               {/* 6. Recommendations */}
               {activeTab === "recommendations" && (
-                <div className="space-y-3">
-                  {filterByExpiration(recommendations).map((rec) => {
-                    const upvotes = rec.upvotes || [];
-                    const hasLiked = upvotes.includes(currentUser);
-                    const ttl = formatTimeRemaining(rec.expires_at);
-
-                    return (
-                      <div
-                        key={rec.id}
-                        className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-2"
-                      >
-                        <div className="flex justify-between items-start">
-                          <div className="flex items-center gap-2">
-                            <span className="text-2xl">
-                              {rec.emoji || "⭐"}
-                            </span>
-                            <div>
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                <span className="text-[11px] bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-md font-medium">
-                                  {rec.category}
-                                </span>
-                                {ttl && (
-                                  <span
-                                    className={`text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 ${
-                                      ttl.urgent || ttl.expired
-                                        ? "bg-rose-50 text-rose-700 font-bold"
-                                        : "bg-amber-50 text-amber-700"
-                                    }`}
-                                  >
-                                    <Clock size={10} /> {ttl.text}
-                                  </span>
-                                )}
-                                {canManage(rec.author) && (
-                                  <>
-                                    <button
-                                      onClick={() => openEditItemModal(rec)}
-                                      className="text-slate-400 hover:text-indigo-600"
-                                    >
-                                      <Edit2 size={13} />
-                                    </button>
-                                    <button
-                                      onClick={() =>
-                                        handleDeleteItem(
-                                          "recommendations",
-                                          rec.id,
-                                        )
-                                      }
-                                      className="text-slate-400 hover:text-rose-600"
-                                    >
-                                      <Trash2 size={13} />
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                              <h3 className="font-bold text-slate-800 mt-0.5">
-                                {rec.title}
-                              </h3>
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => toggleUpvote(rec)}
-                            className={`flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold border transition ${
-                              hasLiked
-                                ? "bg-indigo-600 text-white border-indigo-600"
-                                : "bg-slate-50 text-slate-700 border-slate-200"
-                            }`}
-                          >
-                            <ThumbsUp size={13} /> {upvotes.length}
-                          </button>
-                        </div>
-                        <p className="text-sm text-slate-600">
-                          {rec.description}
-                        </p>
-
-                        {ttl?.canExtend && (
-                          <div className="pt-1">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleExtendItemExpiry("recommendations", rec)
-                              }
-                              className="text-[11px] bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-2.5 py-1 rounded-lg font-bold inline-flex items-center gap-1 transition"
-                            >
-                              <RotateCcw size={11} /> הארך תוקף בחודש (+30 יום)
-                            </button>
-                          </div>
-                        )}
-
-                        <div className="text-xs text-slate-400 pt-1 border-t flex justify-between">
-                          <span>הומלץ ע״י {rec.author}</span>
-                          {rec.location_or_phone && (
-                            <span className="text-indigo-600 font-medium">
-                              {rec.location_or_phone}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                <RecommendationsView
+                  recommendations={recommendations}
+                  currentUser={currentUser}
+                  canManage={canManage}
+                  showExpired={showExpired}
+                  formatHebrewDate={formatHebrewDate}
+                  openCreateItemModal={openCreateItemModal}
+                  openEditItemModal={openEditItemModal}
+                  handleDeleteItem={handleDeleteItem}
+                />
               )}
 
               {/* 7. Contacts */}
               {activeTab === "contacts" && (
-                <div className="space-y-2.5">
-                  {contacts.map((c) => (
-                    <div
-                      key={c.id}
-                      className="bg-white p-3.5 rounded-2xl shadow-sm border border-slate-200 flex justify-between items-center"
-                    >
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h3 className="font-bold text-slate-800 text-sm">
-                            {c.name}
-                          </h3>
-                          <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-md">
-                            {c.role}
-                          </span>
-                        </div>
-                        {c.notes && (
-                          <p className="text-xs text-slate-500 mt-0.5">
-                            {c.notes}
-                          </p>
-                        )}
-                        <p className="text-xs font-mono text-indigo-600 mt-1">
-                          {c.phone}
-                        </p>
-                      </div>
-
-                      <div className="flex items-center gap-1.5">
-                        {isGroupAdmin && (
-                          <>
-                            <button
-                              onClick={() => openEditItemModal(c)}
-                              className="p-1.5 text-slate-400 hover:text-indigo-600"
-                            >
-                              <Edit2 size={14} />
-                            </button>
-                            <button
-                              onClick={() => handleDeleteItem("contacts", c.id)}
-                              className="p-1.5 text-slate-400 hover:text-rose-600"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          </>
-                        )}
-                        <a
-                          href={`tel:${c.phone}`}
-                          className="bg-emerald-600 hover:bg-emerald-700 text-white p-2.5 rounded-xl shadow-sm transition"
-                          title="חיוג מהיר"
-                        >
-                          <Phone size={16} />
-                        </a>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                <ContactsView
+                  contacts={contacts}
+                  currentUser={currentUser}
+                  canManage={canManage}
+                  openCreateItemModal={openCreateItemModal}
+                  openEditItemModal={openEditItemModal}
+                  handleDeleteItem={handleDeleteItem}
+                />
+              )}
+              {/* 8. Tasks */}
+              {activeTab === "tasks" && (
+                <TasksView
+                  activeGroup={activeGroup}
+                  currentUser={currentUser}
+                  displayName={profile?.display_name}
+                  groupMembersList={groupMembersList}
+                />
               )}
             </main>
           )}
@@ -3418,17 +2885,27 @@ export default function App() {
         )}
 
         {/* Group Modal */}
+        {/* Group Modal (Reorder & Toggle Tabs) */}
         {showGroupModal && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
             <form
               onSubmit={handleSaveGroup}
-              className="bg-white w-full max-w-sm p-5 rounded-2xl space-y-3 shadow-xl max-h-[90vh] overflow-y-auto"
+              className="bg-white w-full max-w-sm p-5 rounded-2xl space-y-3 shadow-2xl max-h-[85vh] overflow-y-auto"
             >
-              <h3 className="font-bold text-slate-800 text-lg">
-                {editingGroup
-                  ? "עריכת קבוצה והתאמת לשוניות"
-                  : "פתיחת קבוצה חדשה"}
-              </h3>
+              <div className="flex justify-between items-center border-b pb-2">
+                <h3 className="font-bold text-slate-800 text-lg">
+                  {editingGroup
+                    ? "עריכת קבוצה והתאמת לשוניות"
+                    : "פתיחת קבוצה חדשה"}
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowGroupModal(false)}
+                  className="text-slate-400 hover:text-slate-600 p-1"
+                >
+                  <X size={18} />
+                </button>
+              </div>
 
               <div>
                 <label className="text-xs font-bold text-slate-600">
@@ -3473,25 +2950,85 @@ export default function App() {
                 />
               </div>
 
-              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2">
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-3">
+                {/* הוספת לשוניות כבויות - מופיע למעלה כדי שתמיד יהיה גלוי */}
+                {ALL_TABS_CONFIG.filter((t) => !groupEnabledTabs.includes(t.id))
+                  .length > 0 && (
+                  <div className="pb-2.5 border-b border-slate-200">
+                    <span className="text-[11px] font-bold text-indigo-700 block mb-1.5">
+                      + הוסף לשוניות כבויות לקבוצה:
+                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {ALL_TABS_CONFIG.filter(
+                        (t) => !groupEnabledTabs.includes(t.id),
+                      ).map((t) => (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() =>
+                            setGroupEnabledTabs([...groupEnabledTabs, t.id])
+                          }
+                          className="text-[11px] bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-2.5 py-1.5 rounded-xl font-bold flex items-center gap-1 transition"
+                        >
+                          <Plus size={12} /> {t.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <label className="text-xs font-bold text-slate-700 block">
-                  לשוניות פעילות בקבוצה זו:
+                  סדר הלשוניות הפעילות ({groupEnabledTabs.length}):
                 </label>
-                <div className="space-y-1.5 max-h-40 overflow-y-auto">
-                  {ALL_TABS_CONFIG.map((t) => {
-                    const isChecked = groupEnabledTabs.includes(t.id);
+
+                <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                  {groupEnabledTabs.map((tabId, index) => {
+                    const t = ALL_TABS_CONFIG.find((item) => item.id === tabId);
+                    if (!t) return null;
+                    const TabIcon = t.icon;
                     return (
-                      <label
+                      <div
                         key={t.id}
-                        className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer p-1 hover:bg-white rounded-lg"
+                        className="flex items-center justify-between text-xs text-slate-700 bg-white p-2 rounded-xl border border-slate-200 shadow-sm"
                       >
-                        <input
-                          type="checkbox"
-                          checked={isChecked}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setGroupEnabledTabs([...groupEnabledTabs, t.id]);
-                            } else {
+                        <span className="font-bold flex items-center gap-1.5">
+                          <TabIcon size={14} className="text-indigo-600" />{" "}
+                          {t.label}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            disabled={index === 0}
+                            onClick={() => {
+                              const newTabs = [...groupEnabledTabs];
+                              const temp = newTabs[index];
+                              newTabs[index] = newTabs[index - 1];
+                              newTabs[index - 1] = temp;
+                              setGroupEnabledTabs(newTabs);
+                            }}
+                            className="p-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg disabled:opacity-30 transition font-bold"
+                            title="הזז קדימה"
+                          >
+                            ▲
+                          </button>
+                          <button
+                            type="button"
+                            disabled={index === groupEnabledTabs.length - 1}
+                            onClick={() => {
+                              const newTabs = [...groupEnabledTabs];
+                              const temp = newTabs[index];
+                              newTabs[index] = newTabs[index + 1];
+                              newTabs[index + 1] = temp;
+                              setGroupEnabledTabs(newTabs);
+                            }}
+                            className="p-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg disabled:opacity-30 transition font-bold"
+                            title="הזז אחורה"
+                          >
+                            ▼
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
                               if (groupEnabledTabs.length === 1) {
                                 alert(
                                   "חייבת להישאר לפחות לשונית אחת פעילה בקבוצה.",
@@ -3501,12 +3038,14 @@ export default function App() {
                               setGroupEnabledTabs(
                                 groupEnabledTabs.filter((id) => id !== t.id),
                               );
-                            }
-                          }}
-                          className="w-4 h-4 text-indigo-600 rounded border-slate-300"
-                        />
-                        <span>{t.label}</span>
-                      </label>
+                            }}
+                            className="text-rose-500 hover:text-rose-700 p-1.5 hover:bg-rose-50 rounded-lg transition"
+                            title="הסתר לשונית"
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                      </div>
                     );
                   })}
                 </div>
@@ -3515,14 +3054,14 @@ export default function App() {
               <div className="flex gap-2 pt-2">
                 <button
                   type="submit"
-                  className="flex-1 bg-indigo-600 text-white py-2 rounded-xl text-sm font-bold"
+                  className="flex-1 bg-indigo-600 text-white py-2.5 rounded-xl text-sm font-bold"
                 >
-                  שמור
+                  שמור שינויים
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowGroupModal(false)}
-                  className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl text-sm"
+                  className="px-4 py-2.5 bg-slate-100 text-slate-600 rounded-xl text-sm"
                 >
                   ביטול
                 </button>
@@ -3544,6 +3083,7 @@ export default function App() {
                     ? Utensils
                     : tab.icon;
 
+              const badgeCount = getTabBadgeCount(tab.id);
               const active = activeTab === tab.id;
               const dynamicLabel =
                 tab.id === "announcements"
@@ -3558,19 +3098,28 @@ export default function App() {
                           ? "גבייה"
                           : tab.id === "recommendations"
                             ? "המלצות"
-                            : "טלפונים";
+                            : tab.id === "tasks"
+                              ? "משימות"
+                              : "טלפונים";
 
               return (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex flex-col items-center py-1 px-1 rounded-xl transition ${
+                  className={`flex flex-col items-center py-1 px-1 rounded-xl transition relative ${
                     active
                       ? "text-indigo-600 font-bold"
                       : "text-slate-400 hover:text-slate-600"
                   }`}
                 >
-                  <Icon size={17} />
+                  <div className="relative">
+                    <Icon size={17} />
+                    {badgeCount > 0 && (
+                      <span className="absolute -top-1.5 -right-2 bg-rose-500 text-white text-[9px] font-bold min-w-4 h-4 px-1 rounded-full flex items-center justify-center shadow-sm">
+                        {badgeCount}
+                      </span>
+                    )}
+                  </div>
                   <span className="text-[9px] mt-1">{dynamicLabel}</span>
                 </button>
               );
