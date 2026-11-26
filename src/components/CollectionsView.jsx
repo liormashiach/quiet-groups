@@ -9,6 +9,7 @@ import {
   Users,
   CheckCircle2,
   AlertCircle,
+  Plus,
 } from "lucide-react";
 
 export default function CollectionsView({
@@ -18,7 +19,9 @@ export default function CollectionsView({
   userRoleBadge = "",
   groupMembersList = [],
   canManage,
+  isAdmin = false,
   formatHebrewDate,
+  onCreateCollection,
   onEditCollection,
   onDeleteCollection,
   onToggleUnitPaid,
@@ -26,6 +29,9 @@ export default function CollectionsView({
 }) {
   const [selectedUnitByCol, setSelectedUnitByCol] = useState({});
   const [remindedColIds, setRemindedColIds] = useState({});
+
+  const canCreate =
+    isAdmin || (typeof canManage === "function" && canManage(currentUser));
 
   const unitLabelNoun =
     activeGroup?.type === "building"
@@ -92,19 +98,42 @@ export default function CollectionsView({
   if (collections.length === 0) {
     return (
       <div
-        className="text-center py-8 bg-white rounded-2xl border border-dashed border-slate-300 space-y-2"
+        className="text-center py-8 px-4 bg-white rounded-2xl border border-dashed border-slate-300 space-y-3"
         dir="rtl"
       >
         <Wallet size={28} className="mx-auto text-slate-400" />
         <p className="text-xs text-slate-500">
           אין כרגע בקשות גבייה פעילות בקבוצה.
         </p>
+        {canCreate && onCreateCollection && (
+          <button
+            type="button"
+            onClick={onCreateCollection}
+            className="inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl shadow-sm transition"
+          >
+            <Plus size={15} />
+            פתיחת גבייה חדשה
+          </button>
+        )}
       </div>
     );
   }
 
   return (
     <div className="space-y-4" dir="rtl">
+      {canCreate && onCreateCollection && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={onCreateCollection}
+            className="inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-3.5 py-2 rounded-xl shadow-sm transition"
+          >
+            <Plus size={15} />
+            גבייה חדשה
+          </button>
+        </div>
+      )}
+
       {collections.map((col) => {
         const paidList = col.paid_users || [];
         const amountPerUnit = Number(col.amount) || 0;

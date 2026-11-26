@@ -2256,7 +2256,9 @@ export default function App() {
                   userRoleBadge={profile?.role_badge || ""}
                   groupMembersList={groupMembersList}
                   canManage={canManage}
+                  isAdmin={isGroupAdmin}
                   formatHebrewDate={formatHebrewDate}
+                  onCreateCollection={() => openCreateItemModal()}
                   onEditCollection={openEditItemModal}
                   onDeleteCollection={handleDeleteItem}
                   onToggleUnitPaid={toggleCollectionPaid}
