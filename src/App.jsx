@@ -123,6 +123,7 @@ export default function App() {
   const [formTitle, setFormTitle] = useState("");
   const [formCategory, setFormCategory] = useState("");
   const [formEventTime, setFormEventTime] = useState("10:00");
+  const [formEndDate, setFormEndDate] = useState("");
   const [formDesc, setFormDesc] = useState("");
   const [formExtra, setFormExtra] = useState("");
   const [formExpiresAt, setFormExpiresAt] = useState("");
@@ -889,29 +890,57 @@ export default function App() {
 
   function getGoogleCalendarUrl(ev) {
     const baseDate = ev.event_date || new Date().toISOString().split("T")[0];
-    const cleanDate = baseDate.replace(/-/g, "");
-    const [hh, mm] = (ev.event_time || "10:00").split(":");
-    const startStr = `${cleanDate}T${hh.padStart(2, "0")}${mm.padStart(2, "0")}00`;
-    const endHour = String((parseInt(hh, 10) + 2) % 24).padStart(2, "0");
-    const endStr = `${cleanDate}T${endHour}${mm.padStart(2, "0")}00`;
+    const cleanStart = baseDate.replace(/-/g, "");
+    const isMultiDay = ev.end_date && ev.end_date > baseDate;
+
+    let datesParam = "";
+    if (isMultiDay) {
+      // ב-Google Calendar אירוע כל-היום מסתיים ביום שאחרי תאריך הסיום (exclusive)
+      const endPlusOne = new Date(`${ev.end_date}T00:00:00`);
+      endPlusOne.setDate(endPlusOne.getDate() + 1);
+      const cleanEnd = endPlusOne.toISOString().split("T")[0].replace(/-/g, "");
+      datesParam = `${cleanStart}/${cleanEnd}`;
+    } else {
+      const [hh, mm] = (ev.event_time || "10:00").split(":");
+      const startStr = `${cleanStart}T${hh.padStart(2, "0")}${mm.padStart(2, "0")}00`;
+      const endHour = String((parseInt(hh, 10) + 2) % 24).padStart(2, "0");
+      const endStr = `${cleanStart}T${endHour}${mm.padStart(2, "0")}00`;
+      datesParam = `${startStr}/${endStr}`;
+    }
 
     const params = new URLSearchParams({
       action: "TEMPLATE",
       text: ev.title,
-      dates: `${startStr}/${endStr}`,
+      dates: datesParam,
       details: ev.description || "",
       location: ev.location || "",
     });
     return `https://calendar.google.com/calendar/render?${params.toString()}`;
   }
-
   function downloadIcsFile(ev) {
     const baseDate = ev.event_date || new Date().toISOString().split("T")[0];
-    const cleanDate = baseDate.replace(/-/g, "");
-    const [hh, mm] = (ev.event_time || "10:00").split(":");
-    const startStr = `${cleanDate}T${hh.padStart(2, "0")}${mm.padStart(2, "0")}00`;
-    const endHour = String((parseInt(hh, 10) + 2) % 24).padStart(2, "0");
-    const endStr = `${cleanDate}T${endHour}${mm.padStart(2, "0")}00`;
+    const cleanStart = baseDate.replace(/-/g, "");
+    const isMultiDay = ev.end_date && ev.end_date > baseDate;
+
+    let dtStartLine = "";
+    let dtEndLine = "";
+    let dtStampStr = `${cleanStart}T090000`;
+
+    if (isMultiDay) {
+      const endPlusOne = new Date(`${ev.end_date}T00:00:00`);
+      endPlusOne.setDate(endPlusOne.getDate() + 1);
+      const cleanEnd = endPlusOne.toISOString().split("T")[0].replace(/-/g, "");
+      dtStartLine = `DTSTART;VALUE=DATE:${cleanStart}`;
+      dtEndLine = `DTEND;VALUE=DATE:${cleanEnd}`;
+    } else {
+      const [hh, mm] = (ev.event_time || "10:00").split(":");
+      const startStr = `${cleanStart}T${hh.padStart(2, "0")}${mm.padStart(2, "0")}00`;
+      const endHour = String((parseInt(hh, 10) + 2) % 24).padStart(2, "0");
+      const endStr = `${cleanStart}T${endHour}${mm.padStart(2, "0")}00`;
+      dtStartLine = `DTSTART:${startStr}`;
+      dtEndLine = `DTEND:${endStr}`;
+      dtStampStr = startStr;
+    }
 
     const icsContent = [
       "BEGIN:VCALENDAR",
@@ -919,9 +948,9 @@ export default function App() {
       "PRODID:-//QuietGroups//Community Calendar//HE",
       "BEGIN:VEVENT",
       `UID:${ev.id}@quietgroups.app`,
-      `DTSTAMP:${startStr}`,
-      `DTSTART:${startStr}`,
-      `DTEND:${endStr}`,
+      `DTSTAMP:${dtStampStr}`,
+      dtStartLine,
+      dtEndLine,
       `SUMMARY:${ev.title}`,
       `DESCRIPTION:${(ev.description || "").replace(/\n/g, "\\n")}`,
       `LOCATION:${ev.location || ""}`,
@@ -1188,6 +1217,7 @@ export default function App() {
     setFormTitle("");
     setFormDesc("");
     setFormExtra("");
+    setFormEndDate("");
     setFormEventTime("10:00");
     setPollOptionsText(
       activeGroup?.type === "family"
@@ -1200,6 +1230,7 @@ export default function App() {
       const defaultDate =
         overrideDate || selectedDateFilter || getFutureDateString(7);
       setFormCategory(defaultDate);
+      setFormEndDate(defaultDate);
       setFormExpiresAt(defaultDate);
       setFormChecklist([
         { id: Date.now(), item: "כיבוד / ציוד ראשוני", assignedTo: null },
@@ -1229,6 +1260,7 @@ export default function App() {
     setFormTitle(item.title || item.question || item.name || "");
     setFormExpiresAt(item.expires_at ? item.expires_at.split("T")[0] : "");
     setNewChecklistInput("");
+    setFormEndDate(item.end_date || item.event_date || "");
 
     if (activeTab === "announcements") {
       setFormCategory(item.role || "");
@@ -1327,16 +1359,24 @@ export default function App() {
       }
     } else if (activeTab === "events") {
       const chosenDate = formCategory || new Date().toISOString().split("T")[0];
-      const readableDate = formatHebrewDate(chosenDate, formEventTime);
+      const chosenEndDate =
+        formEndDate && formEndDate >= chosenDate ? formEndDate : chosenDate;
+      const isMultiDay = chosenEndDate > chosenDate;
+
+      const readableDate = isMultiDay
+        ? `${formatHebrewDate(chosenDate)} – ${formatHebrewDate(chosenEndDate)}`
+        : formatHebrewDate(chosenDate, formEventTime);
+
       const payload = {
         title: formTitle,
         event_date: chosenDate,
-        event_time: formEventTime,
+        end_date: chosenEndDate,
+        event_time: isMultiDay ? "" : formEventTime,
         date_str: readableDate,
         description: formDesc,
         location: formExtra || "ייקבע בהמשך",
         checklist: formChecklist,
-        expires_at: expiresIso,
+        expires_at: chosenEndDate, // האירוע יישאר גלוי עד סוף הטיסה/חופשה
       };
       if (editingItem) {
         setEvents((prev) =>
@@ -2675,19 +2715,41 @@ export default function App() {
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="text-[11px] font-bold text-slate-600">
-                        תאריך האירוע
+                        תאריך התחלה
                       </label>
                       <input
                         type="date"
                         required
                         value={formCategory}
                         onChange={(e) => {
-                          setFormCategory(e.target.value);
+                          const val = e.target.value;
+                          setFormCategory(val);
+                          if (!formEndDate || formEndDate < val) {
+                            setFormEndDate(val);
+                          }
+                          if (!editingItem) setFormExpiresAt(val);
+                        }}
+                        className="w-full border p-2 rounded-xl text-xs mt-1"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-bold text-slate-600">
+                        תאריך סיום
+                      </label>
+                      <input
+                        type="date"
+                        min={formCategory}
+                        value={formEndDate}
+                        onChange={(e) => {
+                          setFormEndDate(e.target.value);
                           if (!editingItem) setFormExpiresAt(e.target.value);
                         }}
                         className="w-full border p-2 rounded-xl text-xs mt-1"
                       />
                     </div>
+                  </div>
+
+                  {(!formEndDate || formEndDate === formCategory) && (
                     <div>
                       <label className="text-[11px] font-bold text-slate-600">
                         שעת התחלה
@@ -2700,7 +2762,8 @@ export default function App() {
                         className="w-full border p-2 rounded-xl text-xs mt-1"
                       />
                     </div>
-                  </div>
+                  )}
+
                   <input
                     type="text"
                     placeholder="מיקום המפגש"
@@ -2829,34 +2892,32 @@ export default function App() {
                     (הסתרה אוטומטית מהלוח)
                   </label>
                   <div className="flex gap-1.5 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={() => setQuickExpiryDays(3)}
-                      className="text-[11px] bg-white border px-2 py-1 rounded-lg"
-                    >
-                      3 ימים
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setQuickExpiryDays(7)}
-                      className="text-[11px] bg-white border px-2 py-1 rounded-lg"
-                    >
-                      שבוע
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setQuickExpiryDays(30)}
-                      className="text-[11px] bg-white border px-2 py-1 rounded-lg font-semibold text-indigo-700"
-                    >
-                      חודש (30 יום)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setQuickExpiryDays(null)}
-                      className="text-[11px] bg-white border px-2 py-1 rounded-lg text-slate-500"
-                    >
-                      ללא
-                    </button>
+                    {[
+                      { label: "3 ימים", days: 3 },
+                      { label: "שבוע", days: 7 },
+                      { label: "חודש (30 יום)", days: 30 },
+                      { label: "ללא", days: null },
+                    ].map((opt) => {
+                      const isSelected =
+                        opt.days === null
+                          ? !formExpiresAt
+                          : formExpiresAt === getFutureDateString(opt.days);
+
+                      return (
+                        <button
+                          key={opt.label}
+                          type="button"
+                          onClick={() => setQuickExpiryDays(opt.days)}
+                          className={`text-[11px] border px-2.5 py-1 rounded-lg transition ${
+                            isSelected
+                              ? "bg-indigo-50 border-indigo-500 text-indigo-700 font-bold shadow-xs"
+                              : "bg-white border-slate-200 text-slate-600 hover:bg-slate-100"
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
                   </div>
                   <input
                     type="date"

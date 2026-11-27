@@ -63,26 +63,66 @@ export default function EventsView({
     return cells;
   }
 
+  // הפקת כל התאריכים בטווח של אירוע (מתאריך התחלה ועד תאריך סיום)
+  function getEventDateRange(ev) {
+    if (!ev.event_date) return [];
+    const startStr = ev.event_date;
+    const endStr =
+      ev.end_date && ev.end_date >= startStr ? ev.end_date : startStr;
+
+    const dates = [];
+    const current = new Date(`${startStr}T00:00:00`);
+    const end = new Date(`${endStr}T00:00:00`);
+
+    // הגבלה בטיחותית למניעת לולאה אינסופית במקרה של קלט שגוי (עד 365 יום)
+    let safetyCounter = 0;
+    while (current <= end && safetyCounter < 365) {
+      const yyyy = current.getFullYear();
+      const mm = String(current.getMonth() + 1).padStart(2, "0");
+      const dd = String(current.getDate()).padStart(2, "0");
+      dates.push(`${yyyy}-${mm}-${dd}`);
+      current.setDate(current.getDate() + 1);
+      safetyCounter++;
+    }
+    return dates;
+  }
+
   function isItemExpired(item) {
-    if (!item.expires_at) return false;
-    return new Date(item.expires_at) < new Date();
+    const effectiveExpiry = item.end_date
+      ? `${item.end_date}T23:59:59`
+      : item.expires_at;
+    if (!effectiveExpiry) return false;
+    return new Date(effectiveExpiry) < new Date();
   }
 
   const visibleEvents = showExpired
     ? events
     : events.filter((ev) => !isItemExpired(ev));
 
+  // ספירת אירועים עבור כל יום בחודש (כולל אירועים רב-יומיים)
   const eventsCountByDate = visibleEvents.reduce((acc, ev) => {
-    if (ev.event_date) {
-      acc[ev.event_date] = (acc[ev.event_date] || 0) + 1;
-    }
+    const range = getEventDateRange(ev);
+    range.forEach((isoDate) => {
+      acc[isoDate] = (acc[isoDate] || 0) + 1;
+    });
     return acc;
   }, {});
 
   const todayIso = new Date().toISOString().split("T")[0];
   const monthDays = buildMonthDays(calendarMonth);
+
+  // סינון אירועים שמתקיימים ביום הנבחר (גם אם היום הנבחר הוא באמצע הטווח)
   const displayedEvents = selectedDateFilter
-    ? visibleEvents.filter((ev) => ev.event_date === selectedDateFilter)
+    ? visibleEvents.filter((ev) => {
+        if (!ev.event_date) return false;
+        const endDate =
+          ev.end_date && ev.end_date >= ev.event_date
+            ? ev.end_date
+            : ev.event_date;
+        return (
+          ev.event_date <= selectedDateFilter && endDate >= selectedDateFilter
+        );
+      })
     : visibleEvents;
 
   return (
@@ -257,6 +297,10 @@ export default function EventsView({
           const declinedList = ev.rsvps?.declined || [];
           const isGoing = goingList.includes(currentUser);
 
+          const isMultiDay =
+            ev.end_date && ev.event_date && ev.end_date > ev.event_date;
+          const totalDaysCount = isMultiDay ? getEventDateRange(ev).length : 1;
+
           const allMemberNames = groupMembersList
             .map((m) =>
               m.profiles
@@ -281,10 +325,17 @@ export default function EventsView({
                 <div>
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-xs text-indigo-600 font-bold">
-                      {ev.event_date
-                        ? formatHebrewDate(ev.event_date, ev.event_time)
-                        : ev.date_str}
+                      {isMultiDay
+                        ? `${formatHebrewDate(ev.event_date)} – ${formatHebrewDate(ev.end_date)}`
+                        : ev.event_date
+                          ? formatHebrewDate(ev.event_date, ev.event_time)
+                          : ev.date_str}
                     </span>
+                    {isMultiDay && (
+                      <span className="text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-full font-bold">
+                        {totalDaysCount} ימים
+                      </span>
+                    )}
                   </div>
                   <h3 className="font-bold text-lg text-slate-800 mt-0.5">
                     {ev.title}
@@ -318,7 +369,7 @@ export default function EventsView({
                 <p className="text-sm text-slate-600">{ev.description}</p>
               )}
 
-              {/* כפתורי יצוני ליומן */}
+              {/* כפתורי ייצוא ליומן */}
               <div className="flex gap-2">
                 <a
                   href={getGoogleCalendarUrl(ev)}
